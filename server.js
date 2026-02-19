@@ -185,6 +185,117 @@ PHISHING:
   }
 });
 
+// ✅ IA Procedure endpoint (Comprendre une démarche)
+app.post("/procedure", requireAppKey, async (req, res) => {
+  try {
+    const text = (req.body?.text || "").trim();
+    const category = (req.body?.category || "").trim(); // optionnel: "ants", "caf", "impots", etc.
+
+    if (!text) {
+      return res.status(400).json({ error: "Le champ 'text' est requis." });
+    }
+    if (text.length > 12000) {
+      return res.status(400).json({
+        error: "Texte trop long (max ~12 000 caractères pour le MVP).",
+      });
+    }
+    if (!OPENAI_API_KEY) {
+      return res
+        .status(500)
+        .json({ error: "Server misconfigured (missing OPENAI_API_KEY)" });
+    }
+
+    const instructions = `
+Tu es Clarifia, assistant administratif français spécialisé dans les démarches.
+Ta mission: guider l'utilisateur pas à pas pour réaliser une démarche administrative en France.
+Tu réponds UNIQUEMENT en JSON valide, sans markdown, sans texte autour.
+
+IMPORTANT JSON:
+- N'écris JAMAIS la chaîne "null".
+- Si une valeur est inconnue/absente: utilise null (sans guillemets).
+- Le JSON doit respecter le schéma EXACT ci-dessous.
+
+Schéma JSON EXACT :
+{
+  "title": "Titre court de la démarche",
+  "summary": "Résumé en 2-4 lignes de ce que l'utilisateur doit faire",
+  "need_clarification": false,
+  "clarifying_questions": ["..."],
+  "steps": [
+    {
+      "title": "Étape",
+      "details": "Explication claire et actionnable",
+      "where": "site/guichet (ex: ANTS en ligne) ou null",
+      "link": "https://... ou null"
+    }
+  ],
+  "documents": ["..."],
+  "deadlines": [{"label":"...", "date":"YYYY-MM-DD ou null", "notes":"..."}],
+  "costs": ["..."],
+  "official_sites": [{"name":"...", "url":"https://..."}],
+  "warnings": ["..."]
+}
+
+Règles:
+- Si la demande est ambiguë, mets need_clarification=true et pose 1 à 3 questions MAX dans clarifying_questions.
+- Si need_clarification=true, steps/documents/deadlines peuvent être des listes courtes et génériques (mais utiles).
+- Si need_clarification=false, donne une procédure complète, structurée et concrète.
+- Liens: 1 à 3 liens MAX, en https, et n'invente pas de sites. Si doute: utilise service-public.fr.
+- Français simple, clair, orienté actions.
+- Contexte catégorie (si fourni) : ${category || "non spécifié"}
+`.trim();
+
+    const payload = {
+      model: "gpt-4o-mini",
+      instructions,
+      input: text,
+      max_output_tokens: 900,
+    };
+
+    const r = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!r.ok) {
+      const errText = await r.text();
+      return res
+        .status(502)
+        .json({ error: "OpenAI request failed", details: errText });
+    }
+
+    const data = await r.json();
+
+    const raw =
+      data.output_text ||
+      (Array.isArray(data.output)
+        ? data.output
+            .flatMap((o) => o.content || [])
+            .filter((c) => c.type === "output_text" || c.type === "text")
+            .map((c) => c.text || "")
+            .join("\n")
+        : "");
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return res.status(500).json({
+        error: "AI did not return valid JSON. Adjust prompt.",
+        raw: raw?.slice(0, 2000) || "",
+      });
+    }
+
+    return res.json(parsed);
+  } catch (e) {
+    return res.status(500).json({ error: "Server error", details: String(e) });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Clarifia backend running on http://localhost:${PORT}`);
 });
